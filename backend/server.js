@@ -4,6 +4,7 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
+const twilio = require('twilio');
 
 const app = express();
 const PORT = 3000;
@@ -11,12 +12,18 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_challenge_key';
 
 app.use(cors());
 app.use(bodyParser.json());
+
+const client = new twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
 const users = [
-    { id: 1, email: 'ankurkaushl13@gmail.com', name: 'Ankur Kaushal', password: 'Ankur@123' }
+    { 
+        id: 1, 
+        email: 'ankurkaushl13@gmail.com', 
+        phone: '9876543210', 
+        name: 'Ankur Kaushal' 
+    }
 ];
 
 const otpStore = {};
-
 const blockStore = {};
 
 const OTP_EXPIRY_MS = 10 * 60 * 1000;
@@ -33,110 +40,127 @@ const transporter = nodemailer.createTransport({
 
 const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
 
-const isBlocked = (email) => {
-    const record = blockStore[email];
+const getIdentifierType = (input) => {
+    const emailRegex = /\S+@\S+\.\S+/;
+    return emailRegex.test(input) ? 'email' : 'phone';
+};
+
+const isBlocked = (identifier) => {
+    const record = blockStore[identifier];
     if (!record) return false;
-    if (record.blockExpiresAt && new Date() < record.blockExpiresAt) {
-        return true;
-    }
+    if (record.blockExpiresAt && new Date() < record.blockExpiresAt) return true;
     return false;
 };
 
 app.post('/auth/request-otp', async (req, res) => {
-    const { email } = req.body;
+    let identifier = req.body.identifier || req.body.email || req.body.phone;
 
-    if (!email) return res.status(400).json({ message: 'Email is required' });
+    if (!identifier) return res.status(400).json({ message: 'Identifier required' });
 
-    const user = users.find(u => u.email === email);
-    if (!user) {
-        return res.status(404).json({ message: 'User not found' });
-    }
-    if (isBlocked(email)) {
-        const timeLeft = Math.ceil((blockStore[email].blockExpiresAt - new Date()) / 60000);
-        return res.status(429).json({ message: `Account blocked. Try again in ${timeLeft} minutes.` });
+
+    if (isBlocked(identifier)) {
+        const timeLeft = Math.ceil((blockStore[identifier].blockExpiresAt - new Date()) / 60000);
+        return res.status(429).json({ message: `Blocked. Try again in ${timeLeft} mins.` });
     }
 
     const otp = generateOTP();
-    otpStore[email] = {
-        code: otp,
-        expiresAt: new Date(Date.now() + OTP_EXPIRY_MS)
+    otpStore[identifier] = { 
+        code: otp, 
+        expiresAt: new Date(Date.now() + OTP_EXPIRY_MS) 
     };
 
-    console.log(`[DEBUG] Generated OTP for ${email}: ${otp}`);
+    const type = getIdentifierType(identifier);
 
     try {
-        if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+        if (type === 'email') {
             await transporter.sendMail({
                 from: process.env.EMAIL_USER,
-                to: email,
-                subject: 'Your Login OTP',
-                text: `Your OTP is: ${otp}. It expires in 10 minutes.`
+                to: identifier,
+                subject: 'Login OTP',
+                text: `Your OTP is: ${otp}`
             });
-            console.log(`[MAIL] Sent to ${email}`);
+            console.log(`[MAIL] Sent to ${identifier}`);
         } else {
-            console.log(`[MOCK EMAIL] To: ${email} | Subject: Your OTP | Body: ${otp}`);
+            let formattedPhone = identifier;
+            if (!identifier.startsWith('+')) {
+                formattedPhone = '+91' + identifier; 
+            }
+
+            console.log(`[Twilio] Sending SMS to ${formattedPhone}...`);
+            await client.messages.create({
+                body: `Your verification code is: ${otp}`,
+                from: process.env.TWILIO_PHONE_NUMBER,
+                to: formattedPhone
+            });
+            console.log(`[Twilio] SMS sent successfully!`);
         }
-        res.json({ message: 'OTP sent successfully' });
+        res.json({ message: `OTP sent to ${type}` });
+
     } catch (error) {
-        console.error('Email error:', error);
-        res.status(500).json({ message: 'Failed to send OTP' });
+        console.error('Delivery Error:', error);
+        res.status(500).json({ message: 'Failed to send OTP. Check server logs.' });
     }
 });
 
 app.post('/auth/verify-otp', (req, res) => {
-    const { email, otp } = req.body;
+    const identifier = req.body.identifier || req.body.email || req.body.phone;
+    const { otp } = req.body;
 
-    if (!email || !otp) return res.status(400).json({ message: 'Email and OTP required' });
+    if (!identifier || !otp) return res.status(400).json({ message: 'Identifier and OTP required' });
+    if (isBlocked(identifier)) return res.status(429).json({ message: 'Account blocked.' });
 
-    if (isBlocked(email)) {
-        return res.status(429).json({ message: 'Account blocked due to too many failed attempts.' });
-    }
-
-    const storedOtpData = otpStore[email];
-
-    if (!storedOtpData) {
-        return res.status(400).json({ message: 'No OTP requested or OTP expired' });
-    }
-
-    if (new Date() > storedOtpData.expiresAt) {
-        delete otpStore[email];
-        return res.status(400).json({ message: 'OTP has expired' });
+    const storedOtpData = otpStore[identifier];
+    if (!storedOtpData) return res.status(400).json({ message: 'No OTP requested' });
+    if (new Date() > storedOtpData.expiresAt) { 
+        delete otpStore[identifier]; 
+        return res.status(400).json({ message: 'Expired' }); 
     }
 
     if (storedOtpData.code !== otp) {
-        if (!blockStore[email]) blockStore[email] = { attempts: 0, blockExpiresAt: null };
-        
-        blockStore[email].attempts += 1;
-        
-        if (blockStore[email].attempts >= MAX_ATTEMPTS) {
-            blockStore[email].blockExpiresAt = new Date(Date.now() + BLOCK_DURATION_MS);
-            return res.status(429).json({ message: 'Too many failed attempts. Account blocked for 10 minutes.' });
+        if (!blockStore[identifier]) blockStore[identifier] = { attempts: 0, blockExpiresAt: null };
+        blockStore[identifier].attempts += 1;
+        if (blockStore[identifier].attempts >= MAX_ATTEMPTS) {
+            blockStore[identifier].blockExpiresAt = new Date(Date.now() + BLOCK_DURATION_MS);
+            return res.status(429).json({ message: 'Blocked for 10 minutes.' });
         }
-
-        const remaining = MAX_ATTEMPTS - blockStore[email].attempts;
-        return res.status(401).json({ message: `Invalid OTP. ${remaining} attempts remaining.` });
+        return res.status(401).json({ message: 'Invalid OTP' });
     }
 
-    delete otpStore[email];
-    delete blockStore[email]; 
-    const user = users.find(u => u.email === email);
+    delete otpStore[identifier];
+    delete blockStore[identifier];
+
+    const type = getIdentifierType(identifier);
+    
+    let user = users.find(u => u[type] === identifier);
+
+    if (!user) {
+        user = {
+            id: users.length + 1,
+            name: "Ankur",
+            [type]: identifier 
+        };
+        users.push(user);
+        console.log(`[DB] New User Created:`, user);
+    } else {
+        console.log(`[DB] Existing User Logged In:`, user);
+    }
+
     const token = jwt.sign(
-        { id: user.id, email: user.email, name: user.name },
-        JWT_SECRET,
+        { id: user.id, email: user.email, phone: user.phone, name: user.name }, 
+        JWT_SECRET, 
         { expiresIn: '1h' }
     );
 
     res.json({ 
-        message: 'Login successful',
-        token,
-        user: { email: user.email, name: user.name }
+        message: 'Login successful', 
+        token, 
+        user 
     });
 });
 
 const verifyToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1]; 
-
     if (!token) return res.status(401).json({ message: 'Access Denied' });
 
     jwt.verify(token, JWT_SECRET, (err, user) => {
@@ -155,5 +179,4 @@ app.get('/auth/me', verifyToken, (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`Test Account: ankurkaushl13@gmail.com`);
 });
