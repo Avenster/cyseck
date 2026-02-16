@@ -1,3 +1,10 @@
+const dns = require('dns');
+try {
+    dns.setDefaultResultOrder('ipv4first');
+} catch (error) {
+    console.error('Could not set DNS order:', error);
+}
+
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -8,17 +15,18 @@ const twilio = require('twilio');
 
 const app = express();
 const PORT = 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_challenge_key';
+const JWT_SECRET = process.env.JWT_SECRET;
 
 app.use(cors());
 app.use(bodyParser.json());
 
 const client = new twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
+
 const users = [
     { 
         id: 1, 
         email: 'ankurkaushl13@gmail.com', 
-        phone: '9876543210', 
+        phone: '9784490753', 
         name: 'Ankur Kaushal' 
     }
 ];
@@ -56,7 +64,6 @@ app.post('/auth/request-otp', async (req, res) => {
     let identifier = req.body.identifier || req.body.email || req.body.phone;
 
     if (!identifier) return res.status(400).json({ message: 'Identifier required' });
-
 
     if (isBlocked(identifier)) {
         const timeLeft = Math.ceil((blockStore[identifier].blockExpiresAt - new Date()) / 60000);
