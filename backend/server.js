@@ -147,9 +147,9 @@ app.post('/auth/verify-otp', (req, res) => {
             [type]: identifier 
         };
         users.push(user);
-        console.log(`[DB] New User Created:`, user);
+        console.log(`User Created:`, user);
     } else {
-        console.log(`[DB] Existing User Logged In:`, user);
+        console.log(`User Logged: `, user);
     }
 
     const token = jwt.sign(
